@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# logstash-filter-ti-reputation.rb
+# logstash-filter-flow-reputation.rb
 
 require 'dalli'
 require 'logstash/filters/base'
@@ -15,7 +15,6 @@ module LogStash
     class FlowReputation < LogStash::Filters::Base
       config_name 'flow_reputation'
 
-      config :key_mapping, validate: :hash, default: {}
       config :memcached_servers, validate: :array, default: ["memcached.service:11211"]
       config :memcached_namespace, validate: :string, default: "rbflowrep"
       config :sensor_field, validate: :string, default: "sensor_name"
@@ -24,8 +23,14 @@ module LogStash
       def register
         begin
           @memcached_manager = MemcachedManager.new(@memcached_servers)
+          @sensor_policy_map.each do |key, val|
+            if val.is_a?(String)
+              @sensor_policy_map[key] = JSON.parse(val)
+            end
+          end
         rescue => e
           @logger.error("Error initializing Memcached client: #{e.message}")
+          @logger.error("Error parsing sensor_policy_map JSON: #{e.message}")
           @logger.debug("Backtrace: #{e.backtrace.join("\n")}")
           @memcached_manager = nil
         end
@@ -34,77 +39,56 @@ module LogStash
       def filter(event)
         begin
           rbname = event.get(@sensor_field)
-          if rbname.nil? || rbname.empty?
-            @logger.warn("Sensor field '#{@sensor_field}' not found or empty in event")
-            return
-          end
+          return unless rbname && !rbname.empty?
+
+          policy = @sensor_policy_map[rbname]
+          return unless policy && policy['id'] && policy['name']
       
-          policy_id = @sensor_policy_map[rbname]
-          if policy_id.nil?
-            @logger.debug("No policy ID found for sensor name: #{rbname}")
-            return
-          end
+          policy_id = policy['id']
+          policy_name = policy['name']
       
-          @logger.debug("Sensor '#{rbname}' maps to policy ID '#{policy_id}'")
+          # Por defecto
+          event.set('flow_reputation_category', 'clean')
+          event.set('flow_reputation_score', 0)
+          event.set('flow_reputation_name', "")
+          event.set('flow_reputation_id', 0)
+          event.set('flow_reputation_origin', "")
       
-          @key_mapping.each do |mapped_key, _target_key|
-            original_value = event.get(mapped_key)
-            @logger.warn("Original value: #{original_value}")
-            next unless original_value
+          # Lista de IPs y de países a verificar
+          check_items = {
+            'LAN_IP' => event.get('lan_ip'),
+            'WAN_IP' => event.get('wan_ip'),
+            'COUNTRY_SRC' => event.get('src_country_code'),
+            'COUNTRY_DST' => event.get('dst_country_code')
+          }
       
-            ip_part = original_value.to_s.split(":").first
-            memcached_key = "#{@memcached_namespace}:#{policy_id}:#{ip_part}"
+          check_items.each do |origin, value|
+            next unless value && !value.empty?
       
+            value_key = value.to_s.split(":").first
+            memcached_key = "#{@memcached_namespace}:#{policy_id}:#{policy_name}:#{value_key}"
             @logger.debug("Checking Memcached for key: #{memcached_key}")
             cache_value = @memcached_manager.get(memcached_key)
       
-            if cache_value
-              begin
-                details = JSON.parse(cache_value)
-                event.set("[#{mapped_key}_is_malicious]", "malicious")
+            next unless cache_value
       
-                if details["source"]
-                  event.set("[#{mapped_key}_malicious_source]", details["source"])
-                end
+            # Match encontrado: setear los campos
+            event.set('flow_reputation_category', 'malicious')
+            event.set('flow_reputation_name', policy_name)
+            event.set('flow_reputation_id', policy_id.to_s)
+            event.set('flow_reputation_origin', origin.include?("COUNTRY") ? 'COUNTRY' : origin)
       
-                if details["weight"]
-                  weight = details["weight"].to_f
-                  score = (weight * 100).round(2)
-                  event.set("[#{mapped_key}_malicious_score]", score)
-                end
-      
-              rescue JSON::ParserError
-                @logger.warn("Invalid JSON format in Memcached for key #{memcached_key}: #{cache_value}")
-                event.set("[#{mapped_key}_is_malicious]", "malicious")
+            begin
+              details = JSON.parse(cache_value)
+              if details['weight']
+                score = (details['weight'].to_f * 100).round(2)
+                event.set('flow_reputation_score', score)
               end
-            else
-              @logger.debug("No value found in Memcached for key: #{memcached_key}")
+            rescue JSON::ParserError
+              @logger.warn("Invalid JSON format in Memcached for key #{memcached_key}: #{cache_value}")
             end
       
-            # Nuevo código para verificar el país en la blacklist
-            if event.get('src_country_code')
-              src_country_code = event.get('src_country_code')
-              memcached_country_key = "#{@memcached_namespace}:#{policy_id}:#{src_country_code}"
-              @logger.debug("Checking Memcached for country key: #{memcached_country_key}")
-              country_blacklisted = @memcached_manager.get(memcached_country_key)
-      
-              if country_blacklisted
-                event.set("[#{mapped_key}_is_malicious]", "malicious_country")
-                event.set("[#{mapped_key}_malicious_country_code]", src_country_code)
-              end
-            end
-      
-            if event.get('dst_country_code')
-              dst_country_code = event.get('dst_country_code')
-              memcached_country_key = "#{@memcached_namespace}:#{policy_id}:#{dst_country_code}"
-              @logger.debug("Checking Memcached for country key: #{memcached_country_key}")
-              country_blacklisted = @memcached_manager.get(memcached_country_key)
-      
-              if country_blacklisted
-                event.set("[#{mapped_key}_is_malicious]", "malicious_country")
-                event.set("[#{mapped_key}_malicious_country_code]", dst_country_code)
-              end
-            end
+            break  # Si ya se encontró uno, no seguimos revisando los demás
           end
       
           filter_matched(event)
@@ -114,7 +98,7 @@ module LogStash
           event.set('error_message', "An error occurred in FlowReputation filter")
           filter_matched(event)
         end
-      end
+      end      
       
     end
   end
