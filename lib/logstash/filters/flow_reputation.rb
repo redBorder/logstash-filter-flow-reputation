@@ -64,7 +64,7 @@ module LogStash
       
             value_key = value.to_s.split(":").first
             memcached_key = "#{@memcached_namespace}:#{policy_id}:#{policy_name}:#{value_key}"
-            @logger.info("Checking Memcached for key: #{memcached_key}")
+            @logger.debug("Checking Memcached for key: #{memcached_key}")
             cache_value = @memcached_manager.get(memcached_key)
       
             next unless cache_value
@@ -76,10 +76,9 @@ module LogStash
               if details['weight'] && ['LAN_IP', 'WAN_IP'].include?(origin)
                 weight = details['weight'].to_f
                 weights[origin] = weight
-                @logger.info("Details: #{details}, Weight: #{weight} | Origin: #{origin}")
               end
             rescue JSON::ParserError
-              @logger.info("Valor sin peso para #{memcached_key}, usado solo para flag")
+              @logger.debug("Weightless value for #{memcached_key}")
             end
           end
 
