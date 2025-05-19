@@ -42,10 +42,9 @@ module LogStash
           return unless rbname && !rbname.empty?
       
           policy = @sensor_policy_map[rbname]
-          return unless policy && policy['id'] && policy['name']
+          return unless policy && policy['id']
       
           policy_id = policy['id'].to_s
-          policy_name = policy['name'].to_s
       
           event.set('flow_reputation_category', 'clean')
           event.set('flow_reputation_score', 0)
@@ -58,39 +57,57 @@ module LogStash
       
           weights = {}
           origins_matched = []
+          whitelist_matched = false
       
           check_items.each do |origin, value|
             next unless value && !value.to_s.empty?
       
             value_key = value.to_s.split(":").first
-            memcached_key = "#{@memcached_namespace}:#{policy_id}:#{policy_name}:#{value_key}"
-            @logger.debug("Checking Memcached for key: #{memcached_key}")
-            cache_value = @memcached_manager.get(memcached_key)
       
-            next unless cache_value
+            %w[w b].each do |action|
+              memcached_key = "#{@memcached_namespace}:#{policy_id}:#{action}:#{value_key}"
+              @logger.debug("Checking Memcached for key: #{memcached_key}")
+              cache_value = @memcached_manager.get(memcached_key)
+              next unless cache_value
       
-            origins_matched << origin
-      
-            begin
-              details = JSON.parse(cache_value.to_s)
-              if details['weight'] && ['LAN_IP', 'WAN_IP'].include?(origin)
-                weight = details['weight'].to_f
-                weights[origin] = weight
+              if action == 'w'
+                whitelist_matched = true
+                break
               end
-            rescue JSON::ParserError
-              @logger.debug("Weightless value for #{memcached_key}")
+      
+              origins_matched << origin
+      
+              begin
+                details = JSON.parse(cache_value.to_s)
+                if details['weight'] && ['LAN_IP', 'WAN_IP'].include?(origin)
+                  weight = details['weight'].to_f
+                  weights[origin] = weight
+                  event.set('flow_reputation_source', details['source'].to_s) if details['source']
+                end
+              rescue JSON::ParserError
+                @logger.debug("Invalid JSON in Memcached for #{memcached_key}")
+              end      
+      
+              break
             end
+      
+            break if whitelist_matched
           end
-
-          if !origins_matched.empty?
+      
+          if whitelist_matched
+            event.set('flow_reputation_category', 'clean')
+            event.set('flow_reputation_score', 0)
+          elsif !origins_matched.empty?
             event.set('flow_reputation_category', 'malicious')
-            event.set('flow_reputation_name', policy_name)
+            event.set('flow_reputation_name', policy['name'].to_s)
             event.set('flow_reputation_id', policy_id)
             event.set('flow_reputation_origin', origins_matched.uniq.join(','))
-
+      
             if weights.any?
               max_score = weights.values.max * 100
               event.set('flow_reputation_score', max_score.round(2))
+            else
+              event.set('flow_reputation_score', 100)
             end
           end
       
@@ -102,7 +119,7 @@ module LogStash
           event.set('error_message', "An error occurred in FlowReputation filter")
           filter_matched(event)
         end
-      end            
+      end
 
     end
   end
