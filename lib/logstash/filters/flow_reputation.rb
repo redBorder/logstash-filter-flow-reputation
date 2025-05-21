@@ -113,6 +113,7 @@ module LogStash
               event.set('flow_reputation_origin', origins_matched.uniq.join(','))
             else
               event.set('flow_reputation_category', 'clean')
+              event.set('flow_reputation_score', 0)
             end
       
             event.set('flow_reputation_score', max_score.round(2))
