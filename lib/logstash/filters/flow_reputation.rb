@@ -98,17 +98,24 @@ module LogStash
             event.set('flow_reputation_category', 'clean')
             event.set('flow_reputation_score', 0)
           elsif !origins_matched.empty?
-            event.set('flow_reputation_category', 'malicious')
-            event.set('flow_reputation_name', policy['name'].to_s)
-            event.set('flow_reputation_id', policy_id)
-            event.set('flow_reputation_origin', origins_matched.uniq.join(','))
+            max_score = if weights.any?
+                          weights.values.max * 100
+                        else
+                          100
+                        end
       
-            if weights.any?
-              max_score = weights.values.max * 100
-              event.set('flow_reputation_score', max_score.round(2))
+            threshold = policy['threshold'].to_f rescue 0.0
+      
+            if max_score >= threshold
+              event.set('flow_reputation_category', 'malicious')
+              event.set('flow_reputation_name', policy['name'].to_s)
+              event.set('flow_reputation_id', policy_id)
+              event.set('flow_reputation_origin', origins_matched.uniq.join(','))
             else
-              event.set('flow_reputation_score', 100)
+              event.set('flow_reputation_category', 'clean')
             end
+      
+            event.set('flow_reputation_score', max_score.round(2))
           end
       
           filter_matched(event)
