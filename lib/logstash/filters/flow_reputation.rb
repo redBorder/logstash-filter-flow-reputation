@@ -48,9 +48,6 @@ module LogStash
       
           event.set('flow_reputation_category', 'clean')
           event.set('flow_reputation_score', 0)
-          event.remove('flow_reputation_name')
-          event.remove('flow_reputation_id')
-          event.remove('flow_reputation_origin')
       
           check_items = {
             'LAN_IP'  => event.get('lan_ip'),
@@ -91,7 +88,6 @@ module LogStash
                   if details['weight'] && ['LAN_IP', 'WAN_IP'].include?(origin)
                     weight = details['weight'].to_f
                     weights[origin] = weight
-                    event.set('flow_reputation_source', details['source'].to_s) if details['source']
                   end
                 rescue JSON::ParserError
                   @logger.debug("Invalid JSON in Memcached for #{memcached_key}")
@@ -105,33 +101,29 @@ module LogStash
           end
       
           if whitelist_matched
-            # Resultado limpio por whitelist
             event.set('flow_reputation_category', 'clean')
             event.set('flow_reputation_score', 0)
-            event.remove('flow_reputation_name')
-            event.remove('flow_reputation_id')
-            event.remove('flow_reputation_origin')
           elsif !origins_matched.empty?
-            max_score = if weights.any?
-                          weights.values.max * 100
-                        else
-                          100
-                        end
-      
             threshold = policy['threshold'].to_f rescue 0.0
       
-            if is_definite_blacklist || max_score >= threshold
+            if is_definite_blacklist
               event.set('flow_reputation_category', 'malicious')
-              event.set('flow_reputation_score', max_score.round(2))
+              event.set('flow_reputation_score', 100.0)
               event.set('flow_reputation_name', policy['name'].to_s)
               event.set('flow_reputation_id', policy_id)
               event.set('flow_reputation_origin', origins_matched.uniq.join(','))
-            else
-              event.set('flow_reputation_category', 'clean')
-              event.set('flow_reputation_score', 0)
-              event.remove('flow_reputation_name')
-              event.remove('flow_reputation_id')
-              event.remove('flow_reputation_origin')
+            elsif weights.any?
+              max_score = weights.values.max * 100.0
+              if max_score >= threshold
+                event.set('flow_reputation_category', 'malicious')
+                event.set('flow_reputation_score', max_score.round(2))
+                event.set('flow_reputation_name', policy['name'].to_s)
+                event.set('flow_reputation_id', policy_id)
+                event.set('flow_reputation_origin', origins_matched.uniq.join(','))
+              else
+                event.set('flow_reputation_category', 'clean')
+                event.set('flow_reputation_score', 0)
+              end
             end
           end
       
