@@ -16,116 +16,124 @@ module LogStash
       config_name 'flow_reputation'
 
       config :memcached_servers, validate: :array, default: ["memcached.service:11211"]
-      config :memcached_namespace, validate: :string, default: "rbflowrep"
-      config :sensor_field, validate: :string, default: "sensor_name"
-      config :sensor_policy_map, validate: :hash, required: true
+      config :key_prefix, validate: :string, default: "rbflowrep"
+      config :sensors_policies, validate: :hash, required: true
 
       def register
         begin
           @memcached_manager = MemcachedManager.new(@memcached_servers)
-          @sensor_policy_map.each do |key, val|
-            if val.is_a?(String)
-              @sensor_policy_map[key] = JSON.parse(val)
-            end
+
+          # Parse sensor_policies
+          @sensors_policies.each do |sensor_name, policy|
+            next unless policy.is_a?(String)
+          
+            @sensors_policies[sensor_name] = JSON.parse(policy)
           end
+
         rescue => e
           @logger.error("Error initializing Memcached client: #{e.message}")
-          @logger.error("Error parsing sensor_policy_map JSON: #{e.message}")
+          @logger.error("Error parsing sensors_policies JSON: #{e.message}")
           @logger.debug("Backtrace: #{e.backtrace.join("\n")}")
           @memcached_manager = nil
         end
       end
 
+
       def filter(event)
         begin
-          rbname = event.get(@sensor_field)
-          return unless rbname && !rbname.empty?
+          return unless @memcached_manager
+
+          return unless @sensors_policies && @sensors_policies.any?
+
+          sensor_name = event.get('sensor_name')
+          return unless sensor_name && !sensor_name.empty?
       
-          policy = @sensor_policy_map[rbname]
-          return unless policy && policy['id']
+          sensor_policy = @sensors_policies[sensor_name]
+          return unless sensor_policy['id'] && sensor_policy['name'] && sensor_policy['threshold']
       
-          policy_id = policy['id'].to_s
-      
-          event.set('flow_reputation_category', 'clean')
-          event.set('flow_reputation_score', 0)
-      
-          check_items = {
-            'LAN_IP'  => event.get('lan_ip'),
-            'WAN_IP'  => event.get('wan_ip'),
-            'COUNTRY' => event.get('ip_country_code')
-          }
-      
-          whitelist_matched = false
-          origins_matched = []
+          flow_reputation_id = sensor_policy['id'].to_s
+          flow_reputation_name = sensor_policy['name'].to_s
+          flow_reputation_threshold = sensor_policy['threshold'].to_f rescue 0
+          flow_reputation_category = 'clean'
+          flow_reputation_score = 0
+          flow_reputation_origin = nil
+     
+          reputation_fields = {}
+
+          lan_ip = event.get('lan_ip')
+          reputation_fields['LAN_IP'] = lan_ip if lan_ip
+
+          wan_ip = event.get('wan_ip')
+          reputation_fields['WAN_IP'] = wan_ip if wan_ip
+
+          country = event.get('ip_country_code')
+          reputation_fields['COUNTRY'] = country if country
+           
+          whitelisted_fields = []
+          blacklisted_fields = []
           weights = {}
-          is_definite_blacklist = false
       
-          check_items.each do |origin, value|
+          reputation_fields.each do |field, value|
             next unless value && !value.to_s.empty?
-      
-            value_key = value.to_s.split(":").first
-      
-            %w[w b].each do |action|
-              memcached_key = "#{@memcached_namespace}:#{policy_id}:#{action}:#{value_key}"
-              @logger.debug("Checking Memcached for key: #{memcached_key}")
-              cache_value = @memcached_manager.get(memcached_key)
-              next unless cache_value
-      
-              if action == 'w'
-                whitelist_matched = true
-                break
-              end
-      
-              origins_matched << origin
-      
-              cache_str = cache_value.to_s.strip
-              if cache_str == "1"
-                weights[origin] = 1.0
-                is_definite_blacklist = true
-              else
-                begin
-                  details = JSON.parse(cache_str)
-                  if details['weight'] && ['LAN_IP', 'WAN_IP'].include?(origin)
-                    weight = details['weight'].to_f
-                    weights[origin] = weight
-                  end
-                rescue JSON::ParserError
-                  @logger.debug("Invalid JSON in Memcached for #{memcached_key}")
-                end
-              end
-      
-              break
+     
+            # Firt we check if the key is whitelisted 
+            memcached_key = "#{@key_prefix}:#{flow_reputation_id}:w:#{value.to_s}"
+            @logger.debug("Checking if memcached key is whitelisted: #{memcached_key} ...")
+            memcached_value = @memcached_manager.get(memcached_key)
+             
+            if memcached_value
+              @logger.debug("Key #{memcached_key} is whitelisted.")
+              whitelisted_fields << field
+              next
             end
       
-            break if whitelist_matched
-          end
-      
-          if whitelist_matched
-            event.set('flow_reputation_category', 'clean')
-            event.set('flow_reputation_score', 0)
-          elsif !origins_matched.empty?
-            threshold = policy['threshold'].to_f rescue 0
-      
-            if is_definite_blacklist
-              event.set('flow_reputation_category', 'malicious')
-              event.set('flow_reputation_score', 100)
-              event.set('flow_reputation_name', policy['name'].to_s)
-              event.set('flow_reputation_id', policy_id)
-              event.set('flow_reputation_origin', origins_matched.uniq.join(','))
-            elsif weights.any?
-              max_score = weights.values.max * 100
-              if max_score >= threshold
-                event.set('flow_reputation_category', 'malicious')
-                event.set('flow_reputation_score', max_score.round(2))
-                event.set('flow_reputation_name', policy['name'].to_s)
-                event.set('flow_reputation_id', policy_id)
-                event.set('flow_reputation_origin', origins_matched.uniq.join(','))
-              else
-                event.set('flow_reputation_category', 'clean')
-                event.set('flow_reputation_score', 0)
+            # Then we check if key is blacklisted
+            memcached_key = "#{@key_prefix}:#{flow_reputation_id}:b:#{value.to_s}"
+            @logger.debug("Checking if memcached key is blacklisted: #{memcached_key} ...")
+            memcached_value = @memcached_manager.get(memcached_key)
+            next unless memcached_value
+
+            @logger.debug("Key #{memcached_key} is blacklisted.")
+            blacklisted_fields << field
+     
+            # Clean memcached value 
+            memcached_value = memcached_value.to_s.strip
+
+            # Calculate weight
+            if memcached_value == "1"
+              weights[field] = 1.0
+            else
+              next unless ['LAN_IP', 'WAN_IP'].include?(field)
+
+              begin
+                details = JSON.parse(memcached_value)
+                next unless details['weight']
+
+                weights[field] = details['weight'].to_f
+              rescue JSON::ParserError
+                @logger.debug("Invalid JSON in Memcached for #{memcached_key}")
               end
             end
           end
+     
+          blacklisted_fields = blacklisted_fields - whitelisted_fields 
+
+          if blacklisted_fields.any?
+
+            # Calculate score in case there are weights or 100 (default malicious max score)
+            flow_reputation_score = weights.any? ? (weights.values.max * 100).round(2) : 100
+
+            if flow_reputation_score >= flow_reputation_threshold
+              flow_reputation_category = 'malicious'
+              flow_reputation_origin = blacklisted_fields.uniq.join(',')
+            end
+          end
+
+          event.set('flow_reputation_id', flow_reputation_id)
+          event.set('flow_reputation_name', flow_reputation_name)
+          event.set('flow_reputation_category', flow_reputation_category)
+          event.set('flow_reputation_score', flow_reputation_score)
+          event.set('flow_reputation_origin', flow_reputation_origin) if flow_reputation_origin
       
           filter_matched(event)
       
