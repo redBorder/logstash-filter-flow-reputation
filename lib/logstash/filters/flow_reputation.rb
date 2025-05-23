@@ -51,11 +51,12 @@ module LogStash
           sensor_policy = @sensors_policies[sensor_name]
           return unless sensor_policy['id'] && sensor_policy['name'] && sensor_policy['threshold']
       
-          sensor_policy_id = sensor_policy['id'].to_s
-     
-          # Set default fields values 
-          event.set('flow_reputation_category', 'clean')
-          event.set('flow_reputation_score', 0)
+          flow_reputation_id = sensor_policy['id'].to_s
+          flow_reputation_name = sensor_policy['name'].to_s
+          flow_reputation_threshold = sensor_policy['threshold'].to_f rescue 0
+          flow_reputation_category = 'clean'
+          flow_reputation_score = 0
+          flow_reputation_origin = nil
      
           reputation_fields = {}
 
@@ -76,7 +77,7 @@ module LogStash
             next unless value && !value.to_s.empty?
      
             # Firt we check if the key is whitelisted 
-            memcached_key = "#{@key_prefix}:#{sensor_policy_id}:w:#{value.to_s}"
+            memcached_key = "#{@key_prefix}:#{flow_reputation_id}:w:#{value.to_s}"
             @logger.debug("Checking if memcached key is whitelisted: #{memcached_key} ...")
             memcached_value = @memcached_manager.get(memcached_key)
              
@@ -87,7 +88,7 @@ module LogStash
             end
       
             # Then we check if key is blacklisted
-            memcached_key = "#{@key_prefix}:#{sensor_policy_id}:b:#{value.to_s}"
+            memcached_key = "#{@key_prefix}:#{flow_reputation_id}:b:#{value.to_s}"
             @logger.debug("Checking if memcached key is blacklisted: #{memcached_key} ...")
             memcached_value = @memcached_manager.get(memcached_key)
             next unless memcached_value
@@ -118,19 +119,21 @@ module LogStash
           blacklisted_fields = blacklisted_fields - whitelisted_fields 
 
           if blacklisted_fields.any?
-            threshold = sensor_policy['threshold'].to_f rescue 0
 
-            # Calculate score in case there are weights or 100 (default score)
-            score = weights.any? ? (weights.values.max * 100).round(2) : 100
+            # Calculate score in case there are weights or 100 (default malicious max score)
+            flow_reputation_score = weights.any? ? (weights.values.max * 100).round(2) : 100
 
-            if score >= threshold
-              event.set('flow_reputation_category', 'malicious')
-              event.set('flow_reputation_name', sensor_policy['name'].to_s) if sensor_policy['name']
-              event.set('flow_reputation_id', sensor_policy_id)
-              event.set('flow_reputation_field', blacklisted_fields.uniq.join(','))
-              event.set('flow_reputation_score', score)
+            if flow_reputation_score >= flow_reputation_threshold
+              flow_reputation_category = 'malicious'
+              flow_reputation_origin = blacklisted_fields.uniq.join(',')
             end
           end
+
+          event.set('flow_reputation_id', flow_reputation_id)
+          event.set('flow_reputation_name', flow_reputation_name)
+          event.set('flow_reputation_category', flow_reputation_category)
+          event.set('flow_reputation_score', flow_reputation_score)
+          event.set('flow_reputation_origin', flow_reputation_origin) if flow_reputation_origin
       
           filter_matched(event)
       
