@@ -104,16 +104,16 @@ module LogStash
             event.set('flow_reputation_category', 'clean')
             event.set('flow_reputation_score', 0)
           elsif !origins_matched.empty?
-            threshold = policy['threshold'].to_f rescue 0.0
+            threshold = policy['threshold'].to_f rescue 0
       
             if is_definite_blacklist
               event.set('flow_reputation_category', 'malicious')
-              event.set('flow_reputation_score', 100.0)
+              event.set('flow_reputation_score', 100)
               event.set('flow_reputation_name', policy['name'].to_s)
               event.set('flow_reputation_id', policy_id)
               event.set('flow_reputation_origin', origins_matched.uniq.join(','))
             elsif weights.any?
-              max_score = weights.values.max * 100.0
+              max_score = weights.values.max * 100
               if max_score >= threshold
                 event.set('flow_reputation_category', 'malicious')
                 event.set('flow_reputation_score', max_score.round(2))
