@@ -58,32 +58,32 @@ module LogStash
           flow_reputation_score = 0
           flow_reputation_origin = nil
      
-          reputation_fields = {}
+          indicators = {}
 
           lan_ip = event.get('lan_ip')
-          reputation_fields['LAN_IP'] = lan_ip if lan_ip
+          indicators['LAN_IP'] = lan_ip if lan_ip
 
           wan_ip = event.get('wan_ip')
-          reputation_fields['WAN_IP'] = wan_ip if wan_ip
+          indicators['WAN_IP'] = wan_ip if wan_ip
 
           country = event.get('ip_country_code')
-          reputation_fields['COUNTRY'] = country if country
+          indicators['COUNTRY'] = country if country
            
-          whitelisted_fields = []
-          blacklisted_fields = []
+          whitelisted_indicators = []
+          blacklisted_indicators = []
           weights = {}
       
-          reputation_fields.each do |field, value|
+          indicators.each do |indicator, value|
             next unless value && !value.to_s.empty?
      
-            # Firt we check if the key is whitelisted 
+            # Firt we check if the key is whilisted
             memcached_key = "#{@key_prefix}:#{flow_reputation_id}:w:#{value.to_s}"
             @logger.debug("Checking if memcached key is whitelisted: #{memcached_key} ...")
             memcached_value = @memcached_manager.get(memcached_key)
              
             if memcached_value
               @logger.debug("Key #{memcached_key} is whitelisted.")
-              whitelisted_fields << field
+              whitelisted_indicators << indicator
               next
             end
       
@@ -94,38 +94,38 @@ module LogStash
             next unless memcached_value
 
             @logger.debug("Key #{memcached_key} is blacklisted.")
-            blacklisted_fields << field
+            blacklisted_indicators << indicator
      
             # Clean memcached value 
             memcached_value = memcached_value.to_s.strip
 
             # Calculate weight
             if memcached_value == "1"
-              weights[field] = 1.0
+              weights[indicator] = 1.0
             else
-              next unless ['LAN_IP', 'WAN_IP'].include?(field)
+              next unless ['LAN_IP', 'WAN_IP'].include?(indicator)
 
               begin
                 details = JSON.parse(memcached_value)
                 next unless details['weight']
 
-                weights[field] = details['weight'].to_f
+                weights[indicator] = details['weight'].to_f
               rescue JSON::ParserError
                 @logger.debug("Invalid JSON in Memcached for #{memcached_key}")
               end
             end
           end
      
-          blacklisted_fields = blacklisted_fields - whitelisted_fields 
+          blacklisted_indicators = blacklisted_indicators - whitelisted_indicators
 
-          if blacklisted_fields.any?
+          if blacklisted_indicators.any?
 
             # Calculate score in case there are weights or 100 (default malicious max score)
             flow_reputation_score = weights.any? ? (weights.values.max * 100).round(2) : 100
 
             if flow_reputation_score >= flow_reputation_threshold
               flow_reputation_category = 'malicious'
-              flow_reputation_origin = blacklisted_fields.uniq.join(',')
+              flow_reputation_indicators = blacklisted_indicators.uniq.join(', ')
             end
           end
 
@@ -133,7 +133,7 @@ module LogStash
           event.set('flow_reputation_name', flow_reputation_name)
           event.set('flow_reputation_category', flow_reputation_category)
           event.set('flow_reputation_score', flow_reputation_score)
-          event.set('flow_reputation_origin', flow_reputation_origin) if flow_reputation_origin
+          event.set('flow_reputation_indicators', flow_reputation_indicators) if flow_reputation_indicators
       
           filter_matched(event)
       
